@@ -20,8 +20,9 @@ use x86_64::VirtAddr;
 /// with the CPU's own exception numbers (0..32).
 const PIC_1_OFFSET: u8 = 32;
 const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
-const TIMER_INTERRUPT: u8 = PIC_1_OFFSET;
-const KEYBOARD_INTERRUPT: u8 = PIC_1_OFFSET + 1;
+pub const TIMER_INTERRUPT: u8 = PIC_1_OFFSET;
+pub const KEYBOARD_INTERRUPT: u8 = PIC_1_OFFSET + 1;
+pub const MOUSE_INTERRUPT: u8 = PIC_2_OFFSET + 4;
 
 /// Which TSS stack the double-fault handler runs on. A separate stack means
 /// we can still report a crash even if the normal stack overflowed.
@@ -59,8 +60,18 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
             .set_handler_fn(double_fault_handler)
             .set_stack_index(DOUBLE_FAULT_IST_INDEX);
     }
-    idt[TIMER_INTERRUPT].set_handler_fn(timer_handler);
+    // The timer handler is hand-written assembly (see task.rs) because it
+    // switches between tasks.
+    unsafe {
+        idt[TIMER_INTERRUPT]
+            .set_handler_addr(VirtAddr::new(crate::task::timer_interrupt_entry as *const () as u64));
+    }
     idt[KEYBOARD_INTERRUPT].set_handler_fn(keyboard_handler);
+    idt[MOUSE_INTERRUPT].set_handler_fn(mouse_handler);
+    // "Spurious" interrupts: hardware noise we just ignore.
+    idt[PIC_1_OFFSET + 7].set_handler_fn(spurious_handler);
+    idt[PIC_2_OFFSET + 7].set_handler_fn(spurious_handler);
+    idt[0xFF].set_handler_fn(spurious_handler);
     idt
 });
 
@@ -82,9 +93,14 @@ pub fn init() {
     unsafe {
         let mut pics = PICS.lock();
         pics.initialize();
-        // Only listen to the timer (IRQ0) and keyboard (IRQ1) for now.
-        pics.write_masks(0b1111_1100, 0b1111_1111);
+        // Listen to the timer (IRQ0), keyboard (IRQ1), the link to the
+        // second PIC (IRQ2) and the mouse (IRQ12, line 4 on the second PIC).
+        pics.write_masks(0b1111_1000, 0b1110_1111);
     }
+    if !crate::mouse::init() {
+        println!("No PS/2 mouse found.");
+    }
+    set_timer_frequency(crate::task::TICKS_PER_SECOND as u32);
     x86_64::instructions::interrupts::enable();
 }
 
@@ -101,9 +117,44 @@ extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, _code
     panic!("double fault\n{frame:#?}");
 }
 
-extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
-    unsafe { PICS.lock().notify_end_of_interrupt(TIMER_INTERRUPT) };
+extern "x86-interrupt" fn mouse_handler(_frame: InterruptStackFrame) {
+    let byte: u8 = unsafe { Port::new(0x60).read() };
+    crate::mouse::handle_byte(byte);
+    end_of_interrupt(MOUSE_INTERRUPT);
 }
+
+/// Program the PIT (the PC's basic timer chip) to fire `hz` times a second.
+fn set_timer_frequency(hz: u32) {
+    const PIT_BASE_HZ: u32 = 1_193_182;
+    let divisor = (PIT_BASE_HZ / hz) as u16;
+    unsafe {
+        Port::<u8>::new(0x43).write(0x36); // channel 0, square wave mode
+        let mut data = Port::<u8>::new(0x40);
+        data.write(divisor as u8);
+        data.write((divisor >> 8) as u8);
+    }
+}
+
+/// Tell the interrupt controller we've handled the timer tick so it sends
+/// the next one.
+pub fn end_of_timer_interrupt() {
+    end_of_interrupt(TIMER_INTERRUPT);
+}
+
+fn end_of_interrupt(vector: u8) {
+    if crate::apic::active() {
+        crate::apic::end_of_interrupt();
+    } else {
+        unsafe { PICS.lock().notify_end_of_interrupt(vector) };
+    }
+}
+
+/// Mask every PIC input, once the APIC has taken over.
+pub fn disable_pic() {
+    unsafe { PICS.lock().write_masks(0xFF, 0xFF) };
+}
+
+extern "x86-interrupt" fn spurious_handler(_frame: InterruptStackFrame) {}
 
 extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
     let scancode: u8 = unsafe { Port::new(0x60).read() };
@@ -113,5 +164,5 @@ extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
             print!("{c}");
         }
     }
-    unsafe { PICS.lock().notify_end_of_interrupt(KEYBOARD_INTERRUPT) };
+    end_of_interrupt(KEYBOARD_INTERRUPT);
 }

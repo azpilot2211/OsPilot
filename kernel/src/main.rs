@@ -7,15 +7,38 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 
-mod console;
-mod interrupts;
-mod serial;
+extern crate alloc;
 
+mod allocator;
+mod apic;
+mod console;
+mod desktop;
+mod fat;
+mod files;
+mod gfx;
+mod interrupts;
+mod memory;
+mod mouse;
+mod pci;
+mod serial;
+mod task;
+mod usb;
+
+use alloc::{boxed::Box, string::String, vec::Vec};
+use bootloader_api::config::Mapping;
 use bootloader_api::{BootInfo, BootloaderConfig, entry_point};
 use core::panic::PanicInfo;
+use x86_64::VirtAddr;
 
-/// Settings handed to the bootloader. Defaults are fine for now.
-pub static BOOTLOADER_CONFIG: BootloaderConfig = BootloaderConfig::new_default();
+/// Settings handed to the bootloader.
+pub static BOOTLOADER_CONFIG: BootloaderConfig = {
+    let mut config = BootloaderConfig::new_default();
+    // Map all of physical RAM somewhere in our address space, so the kernel
+    // can read and edit page tables (which live in physical memory).
+    config.mappings.physical_memory = Some(Mapping::Dynamic);
+    config.kernel_stack_size = 256 * 1024;
+    config
+};
 
 entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
@@ -34,8 +57,31 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     println!("Booted via UEFI. Screen is ready.");
 
     interrupts::init();
-    println!("Interrupts are on. Type something:");
+    println!("Interrupts are on.");
+
+    let phys_offset = VirtAddr::new(
+        boot_info.physical_memory_offset.into_option().expect("physical memory not mapped"),
+    );
+    unsafe { memory::init(phys_offset, &boot_info.memory_regions) };
+    allocator::init().expect("heap setup failed");
+    console::enable_log();
+    println!(
+        "Memory: {} MiB usable RAM, {} MiB kernel heap.",
+        memory::usable_bytes(&boot_info.memory_regions) / (1024 * 1024),
+        allocator::HEAP_SIZE / (1024 * 1024),
+    );
+    heap_self_test();
+    apic::init(boot_info.rsdp_addr.into_option());
+
+    task::init();
+    task::spawn("desktop", desktop::run);
+    task::spawn("usb", files::run);
+    print!("Tasks running:");
+    task::list(|name| print!(" {name}"));
     println!();
+
+    println!();
+    println!("Welcome to OsPilot! Type something:");
 
     loop {
         // Sleep until the next interrupt (a key press or a timer tick).
@@ -43,9 +89,27 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
 }
 
+/// Quick check that heap allocation works, using a few standard types.
+fn heap_self_test() {
+    let boxed = Box::new(42);
+    let numbers: Vec<u64> = (1..=1000).collect();
+    let mut text = String::from("heap");
+    text.push_str(" works");
+    assert_eq!(*boxed, 42);
+    assert_eq!(numbers.iter().sum::<u64>(), 500_500);
+    println!("Heap self-test: {text} ({} bytes in use).", allocator::used());
+}
+
 /// Called if anything goes badly wrong. Prints the error and stops.
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    x86_64::instructions::interrupts::disable();
+    // Take the screen back from the desktop. The lock may be held by the
+    // code that crashed, so break it: nothing else will run after this.
+    unsafe { console::CONSOLE.force_unlock() };
+    if let Some(console) = console::CONSOLE.lock().as_mut() {
+        console.set_desktop_active(false);
+    }
     println!();
     println!("KERNEL PANIC: {info}");
     loop {

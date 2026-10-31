@@ -7,8 +7,9 @@ day on a normal UEFI PC, with graphics, internet, and a web browser.
 
 1. **Boot and draw on screen** (done): boots via UEFI in QEMU or from a USB
    stick, draws text on the screen the firmware sets up, reads the keyboard.
-2. **Core OS**: memory management, multitasking, mouse, USB stick file
-   system, a simple windowed desktop.
+2. **Core OS** (done): memory management, preemptive multitasking, APIC
+   interrupts via ACPI, PS/2 mouse, a windowed desktop, and a USB (xHCI)
+   driver that reads files from the USB stick's FAT file system.
 3. **Internet**: network drivers (QEMU first, then a USB Ethernet adapter or
    phone tethering), TCP/IP, DNS, HTTPS. Built-in Wi-Fi is a later stretch goal.
 4. **Browser**: HTML and CSS with images, then JavaScript and video, working
@@ -39,7 +40,8 @@ day on a normal UEFI PC, with graphics, internet, and a web browser.
 
    The first run downloads the right Rust version, UEFI firmware for QEMU,
    and all libraries, so it takes a few minutes. A QEMU window opens showing
-   OsPilot. Click into it and type.
+   OsPilot, booted from an emulated USB stick just like on a real PC. Click
+   into it to use the mouse and keyboard (Ctrl+Alt+G releases the mouse).
 
 `cargo xtask run --serial` runs without a window and prints to the terminal.
 
@@ -56,6 +58,6 @@ day on a normal UEFI PC, with graphics, internet, and a web browser.
 4. Reboot, open the boot menu (often F12, F11, F8 or Esc), and pick the USB
    stick.
 
-Keyboard input currently uses the legacy PS/2 interface. Most laptop
-keyboards support it, but an external USB keyboard may not work until the USB
-driver arrives in step 2. Press the power button to exit.
+Keyboard and mouse currently use the legacy PS/2 interface. Most laptop
+keyboards support it. External USB keyboards and mice, and many laptop
+touchpads, won't work yet: the USB driver only handles storage so far. Press the power button to exit.
