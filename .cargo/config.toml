@@ -1,0 +1,3 @@
+# `cargo xtask <command>` runs our build helper (see xtask/src/main.rs).
+[alias]
+xtask = "run --package xtask --"
