@@ -14,6 +14,7 @@ mod console;
 mod interrupts;
 mod memory;
 mod serial;
+mod task;
 
 use alloc::{boxed::Box, string::String, vec::Vec};
 use bootloader_api::config::Mapping;
@@ -63,6 +64,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     );
     heap_self_test();
 
+    task::init();
+    task::spawn("counter-a", || counter('A', 300));
+    task::spawn("counter-b", || counter('B', 500));
+    print!("Tasks running:");
+    task::list(|name| print!(" {name}"));
+    println!();
+
     println!("Type something:");
     println!();
 
@@ -81,6 +89,14 @@ fn heap_self_test() {
     assert_eq!(*boxed, 42);
     assert_eq!(numbers.iter().sum::<u64>(), 500_500);
     println!("Heap self-test: {text} ({} bytes in use).", allocator::used());
+}
+
+/// A demo task: prints a few numbered lines, pausing between them.
+fn counter(label: char, pause_ms: u64) {
+    for i in 1..=3 {
+        task::sleep_ms(pause_ms);
+        println!("[task {label}] {i} (uptime {} ms)", task::ticks() * 1000 / task::TICKS_PER_SECOND);
+    }
 }
 
 /// Called if anything goes badly wrong. Prints the error and stops.

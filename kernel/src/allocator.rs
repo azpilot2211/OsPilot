@@ -2,7 +2,9 @@
 //! and the rest of Rust's `alloc` library, just like a normal program.
 
 use crate::memory;
+use core::alloc::{GlobalAlloc, Layout};
 use linked_list_allocator::LockedHeap;
+use x86_64::instructions::interrupts::without_interrupts;
 use x86_64::VirtAddr;
 use x86_64::structures::paging::{FrameAllocator, Mapper, Size4KiB, mapper::MapToError};
 
@@ -12,7 +14,22 @@ pub const HEAP_START: u64 = 0x_4444_4444_0000;
 pub const HEAP_SIZE: u64 = 32 * 1024 * 1024;
 
 #[global_allocator]
-static ALLOCATOR: LockedHeap = LockedHeap::empty();
+static ALLOCATOR: InterruptSafeHeap = InterruptSafeHeap(LockedHeap::empty());
+
+/// Wraps the heap so allocations can't be interrupted by a task switch.
+/// Otherwise a task could be paused while holding the heap's lock, and the
+/// next task to allocate would wait for it forever.
+struct InterruptSafeHeap(LockedHeap);
+
+unsafe impl GlobalAlloc for InterruptSafeHeap {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        without_interrupts(|| unsafe { self.0.alloc(layout) })
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        without_interrupts(|| unsafe { self.0.dealloc(ptr, layout) })
+    }
+}
 
 pub fn init(
     mapper: &mut impl Mapper<Size4KiB>,
@@ -20,12 +37,12 @@ pub fn init(
 ) -> Result<(), MapToError<Size4KiB>> {
     memory::map_range(VirtAddr::new(HEAP_START), HEAP_SIZE, mapper, frames)?;
     unsafe {
-        ALLOCATOR.lock().init(HEAP_START as *mut u8, HEAP_SIZE as usize);
+        ALLOCATOR.0.lock().init(HEAP_START as *mut u8, HEAP_SIZE as usize);
     }
     Ok(())
 }
 
 /// Bytes of heap currently in use.
 pub fn used() -> usize {
-    ALLOCATOR.lock().used()
+    without_interrupts(|| ALLOCATOR.0.lock().used())
 }

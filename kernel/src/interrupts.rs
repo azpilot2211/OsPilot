@@ -59,7 +59,12 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
             .set_handler_fn(double_fault_handler)
             .set_stack_index(DOUBLE_FAULT_IST_INDEX);
     }
-    idt[TIMER_INTERRUPT].set_handler_fn(timer_handler);
+    // The timer handler is hand-written assembly (see task.rs) because it
+    // switches between tasks.
+    unsafe {
+        idt[TIMER_INTERRUPT]
+            .set_handler_addr(VirtAddr::new(crate::task::timer_interrupt_entry as *const () as u64));
+    }
     idt[KEYBOARD_INTERRUPT].set_handler_fn(keyboard_handler);
     idt
 });
@@ -85,6 +90,7 @@ pub fn init() {
         // Only listen to the timer (IRQ0) and keyboard (IRQ1) for now.
         pics.write_masks(0b1111_1100, 0b1111_1111);
     }
+    set_timer_frequency(crate::task::TICKS_PER_SECOND as u32);
     x86_64::instructions::interrupts::enable();
 }
 
@@ -101,7 +107,20 @@ extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, _code
     panic!("double fault\n{frame:#?}");
 }
 
-extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
+/// Program the PIT (the PC's basic timer chip) to fire `hz` times a second.
+fn set_timer_frequency(hz: u32) {
+    const PIT_BASE_HZ: u32 = 1_193_182;
+    let divisor = (PIT_BASE_HZ / hz) as u16;
+    unsafe {
+        Port::<u8>::new(0x43).write(0x36); // channel 0, square wave mode
+        let mut data = Port::<u8>::new(0x40);
+        data.write(divisor as u8);
+        data.write((divisor >> 8) as u8);
+    }
+}
+
+/// Tell the PIC we've handled the timer tick so it sends the next one.
+pub fn end_of_timer_interrupt() {
     unsafe { PICS.lock().notify_end_of_interrupt(TIMER_INTERRUPT) };
 }
 
