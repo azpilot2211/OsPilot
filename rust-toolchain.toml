@@ -1,0 +1,7 @@
+# OS kernels need a few unstable Rust features (like the x86 interrupt
+# calling convention), so we use a pinned nightly. rustup installs it
+# automatically the first time you run cargo in this folder.
+[toolchain]
+channel = "nightly-2026-10-15"
+components = ["rust-src", "llvm-tools-preview"]
+targets = ["x86_64-unknown-none", "x86_64-unknown-uefi"]
