@@ -6,7 +6,7 @@ use core::alloc::{GlobalAlloc, Layout};
 use linked_list_allocator::LockedHeap;
 use x86_64::instructions::interrupts::without_interrupts;
 use x86_64::VirtAddr;
-use x86_64::structures::paging::{FrameAllocator, Mapper, Size4KiB, mapper::MapToError};
+use x86_64::structures::paging::{Size4KiB, mapper::MapToError};
 
 /// Where the heap lives in virtual memory. Any unused address works; this
 /// one is easy to spot in crash reports.
@@ -31,11 +31,10 @@ unsafe impl GlobalAlloc for InterruptSafeHeap {
     }
 }
 
-pub fn init(
-    mapper: &mut impl Mapper<Size4KiB>,
-    frames: &mut impl FrameAllocator<Size4KiB>,
-) -> Result<(), MapToError<Size4KiB>> {
-    memory::map_range(VirtAddr::new(HEAP_START), HEAP_SIZE, mapper, frames)?;
+pub fn init() -> Result<(), MapToError<Size4KiB>> {
+    let mut guard = memory::MEMORY.lock();
+    let memory = guard.as_mut().expect("memory not initialised");
+    memory::map_range(VirtAddr::new(HEAP_START), HEAP_SIZE, &mut memory.mapper, &mut memory.frames)?;
     unsafe {
         ALLOCATOR.0.lock().init(HEAP_START as *mut u8, HEAP_SIZE as usize);
     }

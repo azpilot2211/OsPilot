@@ -20,9 +20,9 @@ use x86_64::VirtAddr;
 /// with the CPU's own exception numbers (0..32).
 const PIC_1_OFFSET: u8 = 32;
 const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
-const TIMER_INTERRUPT: u8 = PIC_1_OFFSET;
-const KEYBOARD_INTERRUPT: u8 = PIC_1_OFFSET + 1;
-const MOUSE_INTERRUPT: u8 = PIC_2_OFFSET + 4;
+pub const TIMER_INTERRUPT: u8 = PIC_1_OFFSET;
+pub const KEYBOARD_INTERRUPT: u8 = PIC_1_OFFSET + 1;
+pub const MOUSE_INTERRUPT: u8 = PIC_2_OFFSET + 4;
 
 /// Which TSS stack the double-fault handler runs on. A separate stack means
 /// we can still report a crash even if the normal stack overflowed.
@@ -68,6 +68,10 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     }
     idt[KEYBOARD_INTERRUPT].set_handler_fn(keyboard_handler);
     idt[MOUSE_INTERRUPT].set_handler_fn(mouse_handler);
+    // "Spurious" interrupts: hardware noise we just ignore.
+    idt[PIC_1_OFFSET + 7].set_handler_fn(spurious_handler);
+    idt[PIC_2_OFFSET + 7].set_handler_fn(spurious_handler);
+    idt[0xFF].set_handler_fn(spurious_handler);
     idt
 });
 
@@ -116,7 +120,7 @@ extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, _code
 extern "x86-interrupt" fn mouse_handler(_frame: InterruptStackFrame) {
     let byte: u8 = unsafe { Port::new(0x60).read() };
     crate::mouse::handle_byte(byte);
-    unsafe { PICS.lock().notify_end_of_interrupt(MOUSE_INTERRUPT) };
+    end_of_interrupt(MOUSE_INTERRUPT);
 }
 
 /// Program the PIT (the PC's basic timer chip) to fire `hz` times a second.
@@ -131,10 +135,26 @@ fn set_timer_frequency(hz: u32) {
     }
 }
 
-/// Tell the PIC we've handled the timer tick so it sends the next one.
+/// Tell the interrupt controller we've handled the timer tick so it sends
+/// the next one.
 pub fn end_of_timer_interrupt() {
-    unsafe { PICS.lock().notify_end_of_interrupt(TIMER_INTERRUPT) };
+    end_of_interrupt(TIMER_INTERRUPT);
 }
+
+fn end_of_interrupt(vector: u8) {
+    if crate::apic::active() {
+        crate::apic::end_of_interrupt();
+    } else {
+        unsafe { PICS.lock().notify_end_of_interrupt(vector) };
+    }
+}
+
+/// Mask every PIC input, once the APIC has taken over.
+pub fn disable_pic() {
+    unsafe { PICS.lock().write_masks(0xFF, 0xFF) };
+}
+
+extern "x86-interrupt" fn spurious_handler(_frame: InterruptStackFrame) {}
 
 extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
     let scancode: u8 = unsafe { Port::new(0x60).read() };
@@ -144,5 +164,5 @@ extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
             print!("{c}");
         }
     }
-    unsafe { PICS.lock().notify_end_of_interrupt(KEYBOARD_INTERRUPT) };
+    end_of_interrupt(KEYBOARD_INTERRUPT);
 }

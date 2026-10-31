@@ -10,6 +10,7 @@
 extern crate alloc;
 
 mod allocator;
+mod apic;
 mod console;
 mod desktop;
 mod gfx;
@@ -57,9 +58,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let phys_offset = VirtAddr::new(
         boot_info.physical_memory_offset.into_option().expect("physical memory not mapped"),
     );
-    let mut mapper = unsafe { memory::init(phys_offset) };
-    let mut frames = unsafe { memory::BootInfoFrameAllocator::new(&boot_info.memory_regions) };
-    allocator::init(&mut mapper, &mut frames).expect("heap setup failed");
+    unsafe { memory::init(phys_offset, &boot_info.memory_regions) };
+    allocator::init().expect("heap setup failed");
     console::enable_log();
     println!(
         "Memory: {} MiB usable RAM, {} MiB kernel heap.",
@@ -67,6 +67,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         allocator::HEAP_SIZE / (1024 * 1024),
     );
     heap_self_test();
+    apic::init(boot_info.rsdp_addr.into_option());
 
     task::init();
     task::spawn("desktop", desktop::run);

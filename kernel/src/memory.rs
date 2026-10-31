@@ -11,6 +11,8 @@ use x86_64::structures::paging::{
     FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame,
     Size4KiB, mapper::MapToError,
 };
+use core::sync::atomic::{AtomicU64, Ordering};
+use spin::Mutex;
 use x86_64::{PhysAddr, VirtAddr};
 
 /// Hands out free 4 KiB frames of physical RAM, using the memory map UEFI
@@ -59,16 +61,63 @@ pub fn usable_bytes(regions: &MemoryRegions) -> u64 {
         .sum()
 }
 
-/// Gives access to the active page tables.
+/// The page tables and frame allocator, shared by everything that needs to
+/// map memory.
+pub struct Memory {
+    pub mapper: OffsetPageTable<'static>,
+    pub frames: BootInfoFrameAllocator,
+    /// Next free address in the area we use for device memory.
+    next_mmio: u64,
+}
+
+pub static MEMORY: Mutex<Option<Memory>> = Mutex::new(None);
+static PHYSICAL_MEMORY_OFFSET: AtomicU64 = AtomicU64::new(0);
+
+/// Device registers get mapped here, well away from the heap.
+const MMIO_START: u64 = 0x_5555_0000_0000;
+
+/// Take ownership of the active page tables and the free RAM.
 ///
 /// # Safety
-/// All physical memory must be mapped at `physical_memory_offset`, and this
-/// must only be called once, so there's a single owner of the page tables.
-pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static> {
+/// All physical memory must be mapped at `physical_memory_offset`, the
+/// memory map must be accurate, and this must only be called once.
+pub unsafe fn init(physical_memory_offset: VirtAddr, regions: &'static MemoryRegions) {
     let (level_4_frame, _) = Cr3::read();
     let virt = physical_memory_offset + level_4_frame.start_address().as_u64();
     let level_4_table = unsafe { &mut *virt.as_mut_ptr::<PageTable>() };
-    unsafe { OffsetPageTable::new(level_4_table, physical_memory_offset) }
+    let mapper = unsafe { OffsetPageTable::new(level_4_table, physical_memory_offset) };
+    let frames = unsafe { BootInfoFrameAllocator::new(regions) };
+    PHYSICAL_MEMORY_OFFSET.store(physical_memory_offset.as_u64(), Ordering::Relaxed);
+    *MEMORY.lock() = Some(Memory { mapper, frames, next_mmio: MMIO_START });
+}
+
+/// The virtual address of a physical RAM address (the bootloader maps all
+/// of RAM at a fixed offset).
+pub fn phys_to_virt(phys: u64) -> VirtAddr {
+    VirtAddr::new(PHYSICAL_MEMORY_OFFSET.load(Ordering::Relaxed) + phys)
+}
+
+/// Map a device's registers into memory, with caching turned off so every
+/// read and write really reaches the device.
+pub fn map_mmio(phys: u64, size: u64) -> VirtAddr {
+    let mut guard = MEMORY.lock();
+    let memory = guard.as_mut().expect("memory not initialised");
+    let first = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(phys));
+    let last = PhysFrame::<Size4KiB>::containing_address(PhysAddr::new(phys + size - 1));
+    let virt_base = memory.next_mmio;
+    let flags = PageTableFlags::PRESENT
+        | PageTableFlags::WRITABLE
+        | PageTableFlags::NO_CACHE
+        | PageTableFlags::WRITE_THROUGH
+        | PageTableFlags::NO_EXECUTE;
+    for (i, frame) in PhysFrame::range_inclusive(first, last).enumerate() {
+        let page = Page::containing_address(VirtAddr::new(virt_base + i as u64 * 4096));
+        let Memory { mapper, frames, .. } = memory;
+        unsafe { mapper.map_to(page, frame, flags, frames).expect("mmio map failed").flush() };
+    }
+    let pages = (last.start_address() - first.start_address()) / 4096 + 1;
+    memory.next_mmio += pages * 4096;
+    VirtAddr::new(virt_base + (phys & 0xFFF))
 }
 
 /// Back a range of virtual memory with fresh, writable physical frames.
