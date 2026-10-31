@@ -22,6 +22,7 @@ const PIC_1_OFFSET: u8 = 32;
 const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 const TIMER_INTERRUPT: u8 = PIC_1_OFFSET;
 const KEYBOARD_INTERRUPT: u8 = PIC_1_OFFSET + 1;
+const MOUSE_INTERRUPT: u8 = PIC_2_OFFSET + 4;
 
 /// Which TSS stack the double-fault handler runs on. A separate stack means
 /// we can still report a crash even if the normal stack overflowed.
@@ -66,6 +67,7 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
             .set_handler_addr(VirtAddr::new(crate::task::timer_interrupt_entry as *const () as u64));
     }
     idt[KEYBOARD_INTERRUPT].set_handler_fn(keyboard_handler);
+    idt[MOUSE_INTERRUPT].set_handler_fn(mouse_handler);
     idt
 });
 
@@ -87,8 +89,12 @@ pub fn init() {
     unsafe {
         let mut pics = PICS.lock();
         pics.initialize();
-        // Only listen to the timer (IRQ0) and keyboard (IRQ1) for now.
-        pics.write_masks(0b1111_1100, 0b1111_1111);
+        // Listen to the timer (IRQ0), keyboard (IRQ1), the link to the
+        // second PIC (IRQ2) and the mouse (IRQ12, line 4 on the second PIC).
+        pics.write_masks(0b1111_1000, 0b1110_1111);
+    }
+    if !crate::mouse::init() {
+        println!("No PS/2 mouse found.");
     }
     set_timer_frequency(crate::task::TICKS_PER_SECOND as u32);
     x86_64::instructions::interrupts::enable();
@@ -105,6 +111,12 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, code: P
 
 extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, _code: u64) -> ! {
     panic!("double fault\n{frame:#?}");
+}
+
+extern "x86-interrupt" fn mouse_handler(_frame: InterruptStackFrame) {
+    let byte: u8 = unsafe { Port::new(0x60).read() };
+    crate::mouse::handle_byte(byte);
+    unsafe { PICS.lock().notify_end_of_interrupt(MOUSE_INTERRUPT) };
 }
 
 /// Program the PIT (the PC's basic timer chip) to fire `hz` times a second.

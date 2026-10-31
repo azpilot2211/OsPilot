@@ -4,6 +4,11 @@ members = ["kernel", "xtask"]
 
 [profile.dev]
 panic = "abort"
+# Some optimisation even in debug builds; unoptimised drawing code is slow.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
 
 [profile.release]
 panic = "abort"

@@ -3,8 +3,14 @@
 //! The framebuffer is a big block of memory where each pixel's colour is
 //! stored. Writing to it changes what's on screen. This works on any GPU
 //! UEFI supports, without needing a real graphics driver yet.
+//!
+//! During boot the console draws text straight to the screen. Once the
+//! desktop starts it owns the screen instead, and the console just keeps a
+//! log of text lines that the desktop shows in its terminal window.
 
 use bootloader_api::info::{FrameBuffer, FrameBufferInfo, PixelFormat};
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt;
 use noto_sans_mono_bitmap::{FontWeight, RasterHeight, get_raster, get_raster_width};
 use spin::Mutex;
@@ -28,7 +34,16 @@ pub struct Console {
     info: FrameBufferInfo,
     x: usize,
     y: usize,
+    /// Lines of text printed so far (once the heap exists).
+    log: Option<Vec<String>>,
+    /// While true, text only goes to the log; the desktop draws the screen.
+    desktop_active: bool,
+    /// Bumped on every change, so the desktop knows when to redraw.
+    pub version: u64,
 }
+
+/// Keep at most this many lines of history.
+const MAX_LOG_LINES: usize = 500;
 
 pub static CONSOLE: Mutex<Option<Console>> = Mutex::new(None);
 
@@ -39,12 +54,89 @@ pub fn init(framebuffer: &'static mut FrameBuffer) {
         info,
         x: MARGIN,
         y: MARGIN + BANNER_HEIGHT,
+        log: None,
+        desktop_active: false,
+        version: 0,
     };
     console.clear();
     *CONSOLE.lock() = Some(console);
 }
 
+/// Start recording printed text. Needs the heap, so call it after
+/// `allocator::init`.
+pub fn enable_log() {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        if let Some(console) = CONSOLE.lock().as_mut() {
+            console.log = Some(alloc::vec![String::new()]);
+        }
+    });
+}
+
 impl Console {
+    pub fn width(&self) -> usize {
+        self.info.width
+    }
+
+    pub fn height(&self) -> usize {
+        self.info.height
+    }
+
+    pub fn log(&self) -> &[String] {
+        self.log.as_deref().unwrap_or(&[])
+    }
+
+    /// Hand the screen over to the desktop (or take it back, e.g. on panic).
+    pub fn set_desktop_active(&mut self, active: bool) {
+        self.desktop_active = active;
+        if !active {
+            self.clear();
+        }
+    }
+
+    /// Copy a full-screen image (one `0x00RRGGBB` value per pixel) to the
+    /// framebuffer.
+    pub fn present(&mut self, pixels: &[u32]) {
+        let (width, height) = (self.info.width, self.info.height);
+        let (stride, bpp) = (self.info.stride, self.info.bytes_per_pixel);
+        let bgr = self.info.pixel_format == PixelFormat::Bgr;
+        if bpp == 4 {
+            // Fast path: 4 bytes per pixel is what almost every GPU uses.
+            for y in 0..height {
+                let src = &pixels[y * width..(y + 1) * width];
+                let dst = &mut self.buffer[y * stride * 4..(y * stride + width) * 4];
+                for (out, &p) in dst.chunks_exact_mut(4).zip(src) {
+                    let [b, g, r, _] = p.to_le_bytes();
+                    out.copy_from_slice(&if bgr { [b, g, r, 0] } else { [r, g, b, 0] });
+                }
+            }
+        } else {
+            for y in 0..height {
+                for x in 0..width {
+                    let [b, g, r, _] = pixels[y * width + x].to_le_bytes();
+                    self.put_pixel(x, y, Rgb(r, g, b));
+                }
+            }
+        }
+    }
+
+    fn record(&mut self, c: char) {
+        self.version += 1;
+        let Some(log) = self.log.as_mut() else { return };
+        match c {
+            '\n' => {
+                if log.len() >= MAX_LOG_LINES {
+                    log.remove(0);
+                }
+                log.push(String::new());
+            }
+            '\u{8}' => {
+                log.last_mut().map(String::pop);
+            }
+            '\r' => {}
+            c => log.last_mut().unwrap().push(c),
+        }
+    }
+
     fn clear(&mut self) {
         for y in 0..self.info.height {
             let colour = if y < BANNER_HEIGHT { ACCENT } else { BACKGROUND };
@@ -105,6 +197,10 @@ impl Console {
     }
 
     fn write_char(&mut self, c: char) {
+        self.record(c);
+        if self.desktop_active {
+            return;
+        }
         match c {
             '\n' => self.newline(),
             '\r' => self.x = MARGIN,

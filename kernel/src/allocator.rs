@@ -11,7 +11,7 @@ use x86_64::structures::paging::{FrameAllocator, Mapper, Size4KiB, mapper::MapTo
 /// Where the heap lives in virtual memory. Any unused address works; this
 /// one is easy to spot in crash reports.
 pub const HEAP_START: u64 = 0x_4444_4444_0000;
-pub const HEAP_SIZE: u64 = 32 * 1024 * 1024;
+pub const HEAP_SIZE: u64 = 64 * 1024 * 1024;
 
 #[global_allocator]
 static ALLOCATOR: InterruptSafeHeap = InterruptSafeHeap(LockedHeap::empty());

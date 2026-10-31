@@ -11,8 +11,11 @@ extern crate alloc;
 
 mod allocator;
 mod console;
+mod desktop;
+mod gfx;
 mod interrupts;
 mod memory;
+mod mouse;
 mod serial;
 mod task;
 
@@ -57,6 +60,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let mut mapper = unsafe { memory::init(phys_offset) };
     let mut frames = unsafe { memory::BootInfoFrameAllocator::new(&boot_info.memory_regions) };
     allocator::init(&mut mapper, &mut frames).expect("heap setup failed");
+    console::enable_log();
     println!(
         "Memory: {} MiB usable RAM, {} MiB kernel heap.",
         memory::usable_bytes(&boot_info.memory_regions) / (1024 * 1024),
@@ -65,14 +69,13 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     heap_self_test();
 
     task::init();
-    task::spawn("counter-a", || counter('A', 300));
-    task::spawn("counter-b", || counter('B', 500));
+    task::spawn("desktop", desktop::run);
     print!("Tasks running:");
     task::list(|name| print!(" {name}"));
     println!();
 
-    println!("Type something:");
     println!();
+    println!("Welcome to OsPilot! Type something:");
 
     loop {
         // Sleep until the next interrupt (a key press or a timer tick).
@@ -91,17 +94,16 @@ fn heap_self_test() {
     println!("Heap self-test: {text} ({} bytes in use).", allocator::used());
 }
 
-/// A demo task: prints a few numbered lines, pausing between them.
-fn counter(label: char, pause_ms: u64) {
-    for i in 1..=3 {
-        task::sleep_ms(pause_ms);
-        println!("[task {label}] {i} (uptime {} ms)", task::ticks() * 1000 / task::TICKS_PER_SECOND);
-    }
-}
-
 /// Called if anything goes badly wrong. Prints the error and stops.
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    x86_64::instructions::interrupts::disable();
+    // Take the screen back from the desktop. The lock may be held by the
+    // code that crashed, so break it: nothing else will run after this.
+    unsafe { console::CONSOLE.force_unlock() };
+    if let Some(console) = console::CONSOLE.lock().as_mut() {
+        console.set_desktop_active(false);
+    }
     println!();
     println!("KERNEL PANIC: {info}");
     loop {
