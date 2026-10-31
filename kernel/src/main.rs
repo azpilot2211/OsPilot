@@ -13,12 +13,16 @@ mod allocator;
 mod apic;
 mod console;
 mod desktop;
+mod fat;
+mod files;
 mod gfx;
 mod interrupts;
 mod memory;
 mod mouse;
+mod pci;
 mod serial;
 mod task;
+mod usb;
 
 use alloc::{boxed::Box, string::String, vec::Vec};
 use bootloader_api::config::Mapping;
@@ -71,6 +75,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     task::init();
     task::spawn("desktop", desktop::run);
+    task::spawn("usb", files::run);
     print!("Tasks running:");
     task::list(|name| print!(" {name}"));
     println!();

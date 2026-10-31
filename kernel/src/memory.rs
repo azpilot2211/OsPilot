@@ -136,3 +136,58 @@ pub fn map_range(
     }
     Ok(())
 }
+
+/// A block of physically contiguous RAM for a device to read and write
+/// directly (DMA). Devices need physical addresses; we use the virtual one.
+pub struct DmaBuffer {
+    pub phys: u64,
+    pub virt: *mut u8,
+    pub size: usize,
+}
+
+unsafe impl Send for DmaBuffer {}
+
+impl DmaBuffer {
+    /// Allocate `size` bytes (rounded up to whole 4 KiB pages), zeroed.
+    pub fn new(size: usize) -> Self {
+        let pages = size.div_ceil(4096).max(1);
+        let mut guard = MEMORY.lock();
+        let memory = guard.as_mut().expect("memory not initialised");
+        // Our frame allocator hands out frames in address order, so a run of
+        // allocations is usually contiguous. If it isn't (we crossed into a
+        // new region), start the run again.
+        'retry: loop {
+            let first = memory.frames.allocate_frame().expect("out of memory").start_address().as_u64();
+            for i in 1..pages as u64 {
+                let next = memory.frames.allocate_frame().expect("out of memory").start_address().as_u64();
+                if next != first + i * 4096 {
+                    continue 'retry;
+                }
+            }
+            let virt = phys_to_virt(first).as_mut_ptr::<u8>();
+            unsafe { core::ptr::write_bytes(virt, 0, pages * 4096) };
+            return Self { phys: first, virt, size: pages * 4096 };
+        }
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.virt, self.size) }
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        unsafe { core::slice::from_raw_parts_mut(self.virt, self.size) }
+    }
+
+    pub fn read_u32(&self, offset: usize) -> u32 {
+        unsafe { core::ptr::read_volatile(self.virt.add(offset) as *const u32) }
+    }
+
+    pub fn write_u32(&mut self, offset: usize, value: u32) {
+        unsafe { core::ptr::write_volatile(self.virt.add(offset) as *mut u32, value) }
+    }
+
+    pub fn write_u64(&mut self, offset: usize, value: u64) {
+        self.write_u32(offset, value as u32);
+        self.write_u32(offset + 4, (value >> 32) as u32);
+    }
+}

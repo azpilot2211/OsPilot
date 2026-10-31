@@ -87,8 +87,11 @@ fn run_qemu(image: &Path, serial_only: bool) -> Result<()> {
         .arg(format!("if=pflash,format=raw,readonly=on,file={}", code.display()))
         .arg("-drive")
         .arg(format!("if=pflash,format=raw,file={}", vars.display()))
+        // Attach the image as a USB stick, like on a real PC.
+        .args(["-device", "qemu-xhci,id=xhci"])
         .arg("-drive")
-        .arg(format!("format=raw,file={}", image.display()))
+        .arg(format!("if=none,id=stick,format=raw,file={}", image.display()))
+        .args(["-device", "usb-storage,bus=xhci.0,drive=stick,bootindex=0"])
         .args(["-m", "512M", "-serial", "stdio"]);
     if serial_only {
         qemu.args(["-display", "none"]);

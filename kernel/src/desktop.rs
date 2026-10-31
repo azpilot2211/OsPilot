@@ -6,7 +6,7 @@
 
 use crate::console::CONSOLE;
 use crate::gfx::{CHAR_WIDTH, Canvas, Colour, LINE_HEIGHT};
-use crate::{mouse, task};
+use crate::{files, mouse, task};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -30,6 +30,8 @@ enum Content {
     /// The console log, with whatever you type.
     Terminal,
     About,
+    /// What's on the USB stick.
+    Files,
 }
 
 struct Window {
@@ -70,6 +72,14 @@ pub fn run() {
     let terminal_h = (height * 3 / 5).max(300);
     let mut windows: Vec<Window> = alloc::vec![
         Window { title: "About OsPilot", x: 60, y: 60, w: 360, h: 170, content: Content::About },
+        Window {
+            title: "Files",
+            x: 40,
+            y: 260,
+            w: 360,
+            h: (height as i32 - 340).max(200) as usize,
+            content: Content::Files,
+        },
         Window {
             title: "Terminal",
             x: (width - terminal_w) as i32 / 2 + 80,
@@ -117,7 +127,9 @@ pub fn run() {
         }
         was_pressed = pressed;
 
-        let log_version = without_interrupts(|| CONSOLE.lock().as_ref().map_or(0, |c| c.version));
+        let log_version = without_interrupts(|| {
+            CONSOLE.lock().as_ref().map_or(0, |c| c.version) + files::LISTING.lock().version
+        });
         let seconds = task::ticks() / task::TICKS_PER_SECOND;
         let (top_x, top_y) = windows.last().map_or((0, 0), |w| (w.x, w.y));
         let state = (log_version, seconds, mx, my, top_x, top_y);
@@ -187,6 +199,25 @@ fn draw_window(canvas: &mut Canvas, window: &Window, active: bool) {
                 canvas.text(inner_x, inner_y + (i * LINE_HEIGHT) as i32, line, *colour, i == 0, inner_w);
             }
         }
+        Content::Files => {
+            let (status, lines) = without_interrupts(|| {
+                let listing = files::LISTING.lock();
+                (listing.status.clone(), listing.lines.clone())
+            });
+            canvas.text(inner_x, inner_y, &status, TEXT, true, inner_w);
+            let rows = inner_h / LINE_HEIGHT;
+            for (i, (name, size)) in lines.iter().take(rows.saturating_sub(1)).enumerate() {
+                let y = inner_y + ((i + 1) * LINE_HEIGHT) as i32;
+                let colour = if size.is_none() { ACCENT } else { TEXT };
+                canvas.text(inner_x, y, name, colour, false, inner_w);
+                if let Some(size) = size {
+                    let label = human_size(*size);
+                    let lw = label.len() * CHAR_WIDTH;
+                    canvas.fill_rect(x + (w - lw - 18) as i32, y, lw + 8, LINE_HEIGHT, WINDOW_BG);
+                    canvas.text(x + (w - lw - 10) as i32, y, &label, TEXT_DIM, false, lw);
+                }
+            }
+        }
         Content::Terminal => {
             let cols = inner_w / CHAR_WIDTH;
             let rows = inner_h / LINE_HEIGHT;
@@ -221,5 +252,13 @@ fn draw_window(canvas: &mut Canvas, window: &Window, active: bool) {
                 canvas.fill_rect(cx, inner_y + (row * LINE_HEIGHT) as i32 + 2, CHAR_WIDTH, LINE_HEIGHT - 4, ACCENT);
             }
         }
+    }
+}
+
+fn human_size(bytes: u32) -> String {
+    match bytes {
+        ..1024 => format!("{bytes} B"),
+        ..1048576 => format!("{} KiB", bytes / 1024),
+        _ => format!("{} MiB", bytes / 1048576),
     }
 }
